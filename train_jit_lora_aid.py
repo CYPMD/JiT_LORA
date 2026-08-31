@@ -38,17 +38,35 @@ DEFAULT_LORA_TARGETS = ("attn.qkv", "attn.proj", "mlp.w12", "mlp.w3")
 
 
 class ImagesOnly(Dataset):
-    """Use ImageFolder for discovery, but deliberately discard every label."""
+    """Load a flat image directory or class folders, never returning labels."""
 
     def __init__(self, root: str | Path, transform):
-        self.dataset = datasets.ImageFolder(str(root), transform=transform)
+        self.root = Path(root)
+        self.transform = transform
+        extensions = {extension.lower() for extension in datasets.folder.IMG_EXTENSIONS}
+        self.flat_image_paths = sorted(
+            path
+            for path in self.root.iterdir()
+            if path.is_file() and path.suffix.lower() in extensions
+        )
+
+        # Prefer direct image files. Fall back to ImageFolder only when the
+        # root has no images and actually contains class subdirectories.
+        self.image_folder = None
+        if not self.flat_image_paths:
+            self.image_folder = datasets.ImageFolder(str(self.root), transform=transform)
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        if self.image_folder is not None:
+            return len(self.image_folder)
+        return len(self.flat_image_paths)
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        image, _unused_class = self.dataset[index]
-        return image
+        if self.image_folder is not None:
+            image, _unused_class = self.image_folder[index]
+            return image
+        image = datasets.folder.default_loader(str(self.flat_image_paths[index]))
+        return self.transform(image)
 
 
 class LoRALinear(nn.Module):
@@ -387,7 +405,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Unconditional LoRA fine-tuning of JiT-256 on AID"
     )
-    parser.add_argument("--data_path", required=True, help="AID root (class folders are ignored)")
+    parser.add_argument(
+        "--data_path",
+        required=True,
+        help="AID root containing images directly (class folders also supported and ignored)",
+    )
     parser.add_argument("--pretrained", required=True, help="Base .pth file or checkpoint directory")
     parser.add_argument(
         "--pretrained_key",
